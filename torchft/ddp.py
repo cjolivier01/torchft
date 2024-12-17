@@ -40,8 +40,8 @@ class DistributedDataParallel(parallel.DistributedDataParallel):
       rather than an internal broadcast (torchft.Manager will do this).
     * Using non-basic features of the DDP may cause your model to catch fire as
       they haven't been tested with torchft.
-    * This doesn't any sanity checks such as verifying parameter sizes are the
-      same across workers.
+    * This doesn't perform any sanity checks such as verifying parameter sizes are
+      the same across workers.
     """
 
     def __init__(self, manager: "Manager", module: nn.Module, **kwargs: object) -> None:
