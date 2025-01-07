@@ -1,2 +1,0 @@
-#!/bin/bash
-srun -N 3 --tasks-per-node=2 --reservation=colivier-dpu -p ap-dpu ./srun_run.sh $@

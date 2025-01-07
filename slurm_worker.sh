@@ -22,9 +22,17 @@ get_first_slurm_node() {
     echo "$first_node"
 }
 
+MASTER_HOST="$(get_first_slurm_node)"
+if [ "${SLURM_TASKID}" == "0" ]; then
+  echo "MASTER_HOST=${MASTER_HOST}"
+fi
+
+echo "TORCHFT_LIGHTHOUSE=$TORCHFT_LIGHTHOUSE"
+
 # /bin/env | grep SLURM_ | sort
 torchrun \
-  --nodes=${SLURM_NNODES} \
+  --master_port 29501 \
+  --nnodes=${SLURM_NNODES} \
   --nproc-per-node=${SLURM_NTASKS_PER_NODE} \
   --max-restarts=${MAX_RESTARTS} \
   --rdzv-id=${SLURM_JOBID} \
