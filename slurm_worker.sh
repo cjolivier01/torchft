@@ -29,13 +29,15 @@ fi
 
 echo "TORCHFT_LIGHTHOUSE=$TORCHFT_LIGHTHOUSE"
 
+LOG_FILE="$(hostname -s)-${SLURM_PROCID}-n-${SLURM_NODEID}-lid-${SLURM_LOCALID}.log"
+
 # /bin/env | grep SLURM_ | sort
 torchrun \
   --master_port 29501 \
   --nnodes=${SLURM_NNODES} \
-  --nproc-per-node=${SLURM_NTASKS_PER_NODE} \
+  --nproc-per-node=${TASKS_PER_NODE} \
   --max-restarts=${MAX_RESTARTS} \
   --rdzv-id=${SLURM_JOBID} \
   --rdzv-backend=c10d \
   --rdzv-endpoint="$(get_first_slurm_node)" \
-  $@
+  $@ |& tee "${LOG_FILE}"

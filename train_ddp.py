@@ -7,6 +7,7 @@
 import logging
 import os
 import sys
+from typing import List, Optional, Set, Union
 
 import torch
 import torch.nn.functional as F
@@ -27,7 +28,24 @@ from torchft import (
 logging.basicConfig(level=logging.INFO)
 
 
+def print_envs(startswith: Union[str, List[str]]) -> None:
+    found_keys: Set[str] = set()
+    if isinstance(startswith, str):
+        startswith = [startswith]
+    for k in os.environ.keys():
+        for sw in startswith:
+            if k.startswith(sw):
+                found_keys.add(k)
+    if found_keys:
+        found_sorted: List[str] = sorted(list(found_keys))
+        rank = int(os.environ["RANK"])
+        for k in found_sorted:
+            print(f"RANK={rank}: {k}={os.environ[k]}")
+
+
 def main() -> None:
+    print_envs(["TORCHELASTIC", "TORCHFT"])
+    restart_count = int(os.environ.get("TORCHELASTIC_RESTART_COUNT", "0"))
     REPLICA_GROUP_ID = int(os.environ.get("REPLICA_GROUP_ID", 0))
     NUM_REPLICA_GROUPS = int(os.environ.get("NUM_REPLICA_GROUPS", 2))
 
@@ -37,6 +55,18 @@ def main() -> None:
     trainset = torchvision.datasets.CIFAR10(
         root="./cifar", train=True, download=True, transform=transform
     )
+
+    max_iters: int = 2000
+    fault_step: int = 1000
+    fault_rank: Optional[Union[str, int]] = os.environ.get("DOJOTORCH_FAULT_RANK", "")
+    this_rank: int = int(os.environ.get("RANK", "0"))
+    print(f"this_rank={this_rank}")
+    if restart_count == 0 and fault_rank:
+        fault_rank = int(fault_rank)
+        if fault_rank != this_rank:
+            fault_rank = None
+    else:
+        fault_rank = None
 
     # This shards the training set across all ranks and replica groups. We manage
     # the dataloaders on a per replica group basis with the assumption that the
@@ -53,7 +83,12 @@ def main() -> None:
     # This uses the torchdata StatefulDataLoader to be able to checkpoint and
     # restore the per worker dataloader position.
     trainloader = StatefulDataLoader(
-        trainset, batch_size=64, shuffle=True, num_workers=2
+        trainset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=2,
+        # sampler=sampler,
+        snapshot_every_n_steps=1,
     )
 
     def load_state_dict(state_dict):
@@ -67,6 +102,7 @@ def main() -> None:
         }
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    assert device != "cpu"
     pg = ProcessGroupBabyNCCL() if torch.cuda.is_available() else ProcessGroupGloo()
 
     manager = Manager(
@@ -96,7 +132,7 @@ def main() -> None:
             x = self.fc3(x)
             return x
 
-    m = Net().to(device)
+    m: Union[Net, DistributedDataParallel] = Net().to(device)
     m = DistributedDataParallel(manager, m)
     optimizer = Optimizer(manager, optim.AdamW(m.parameters()))
     criterion = nn.CrossEntropyLoss()
@@ -120,11 +156,15 @@ def main() -> None:
             # Gradient allreduce overlaps with the backwards pass.
             loss.backward()
 
+            if fault_rank is not None and fault_rank == this_rank and i == fault_step:
+                print(f"INTENTIONAL FAILURE OF RANK {this_rank} AT STEP {i}")
+                raise AssertionError("Rank dying")
+
             # must be called at the end of the train loop
             # This may not actually step the optimizer if an error occured during grad allreduce.
             optimizer.step()
 
-            if manager.current_step() % 100 == 0:
+            if True or manager.current_step() % 100 == 0:
                 print(f"[{manager.current_step()}] loss = {loss.item()}")
 
             # TODO (by the user): periodically checkpoint model, optim, manager and dataloader
@@ -136,8 +176,7 @@ def main() -> None:
             # they're shared across all groups and will load from existing replicas as
             # long as not every worker goes down.
 
-            if manager.current_step() >= 10000:
-                # complete training
+            if manager.current_step() >= max_iters:
                 exit()
 
 
