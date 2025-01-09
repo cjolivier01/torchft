@@ -5,15 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import multiprocessing
 import os
 import sys
-from typing import List, Optional, Set, Union
+import traceback
+from typing import Any, Dict, List, Optional, Set, Union
 
 import torch
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 from torch import nn, optim
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from torchft import (
@@ -43,6 +46,17 @@ def print_envs(startswith: Union[str, List[str]]) -> None:
             print(f"RANK={rank}: {k}={os.environ[k]}")
 
 
+def load_checkpoint(file: str) -> Optional[Dict[Any, Any]]:
+    if not os.path.exists(file):
+        return None
+    return torch.load(file)
+
+
+def save_checkpoint(file: str, state_dict: Dict[Any, Any]) -> None:
+    torch.save(state_dict, file)
+
+
+@record
 def main() -> None:
     print_envs(["TORCHELASTIC", "TORCHFT"])
     restart_count = int(os.environ.get("TORCHELASTIC_RESTART_COUNT", "0"))
@@ -56,9 +70,9 @@ def main() -> None:
         root="./cifar", train=True, download=True, transform=transform
     )
 
-    max_iters: int = 2000
-    fault_step: int = 1000
-    fault_rank: Optional[Union[str, int]] = os.environ.get("DOJOTORCH_FAULT_RANK", "")
+    fault_step: int = 10
+    # fault_rank: Optional[Union[str, int]] = os.environ.get("DOJOTORCH_FAULT_RANK", "")
+    fault_rank: Optional[int] = 1
     this_rank: int = int(os.environ.get("RANK", "0"))
     print(f"this_rank={this_rank}")
     if restart_count == 0 and fault_rank:
@@ -80,6 +94,8 @@ def main() -> None:
         num_replicas=1,
     )
 
+    checkpoint_every_n_steps: int = 5
+
     # This uses the torchdata StatefulDataLoader to be able to checkpoint and
     # restore the per worker dataloader position.
     trainloader = StatefulDataLoader(
@@ -89,6 +105,7 @@ def main() -> None:
         num_workers=2,
         # sampler=sampler,
         snapshot_every_n_steps=1,
+        multiprocessing_context=multiprocessing.get_context("spawn"),
     )
 
     def load_state_dict(state_dict):
@@ -137,7 +154,16 @@ def main() -> None:
     optimizer = Optimizer(manager, optim.AdamW(m.parameters()))
     criterion = nn.CrossEntropyLoss()
 
-    print(m)
+    cpk = load_checkpoint("latest.pth")
+    if cpk is not None:
+        m.load_state_dict(cpk["model"])
+        optimizer.load_state_dict(cpk["optim"])
+        trainloader.load_state_dict(cpk["trainloader"])
+        manager.load_state_dict(cpk["manager"])
+
+    max_iters: int = manager.current_step() + 20
+
+    # print(m)
 
     # You can use an epoch based training but with faults it's easier to use step
     # based training.
@@ -158,7 +184,8 @@ def main() -> None:
 
             if fault_rank is not None and fault_rank == this_rank and i == fault_step:
                 print(f"INTENTIONAL FAILURE OF RANK {this_rank} AT STEP {i}")
-                raise AssertionError("Rank dying")
+                # raise AssertionError("Rank dying")
+                sys.exit(0)
 
             # must be called at the end of the train loop
             # This may not actually step the optimizer if an error occured during grad allreduce.
@@ -176,9 +203,24 @@ def main() -> None:
             # they're shared across all groups and will load from existing replicas as
             # long as not every worker goes down.
 
+            if i and i % checkpoint_every_n_steps == 0:
+                state = state_dict()
+                state["trainloader"] = trainloader.state_dict()
+                state["manager"] = manager.state_dict()
+                torch.save(state, "latest.pth")
+
             if manager.current_step() >= max_iters:
+                print(f"Rank {this_rank} exiting due ot max iters reached")
                 exit()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as ex:
+        traceback.print_exc()
+    finally:
+        this_rank: int = int(os.environ.get("RANK", "0"))
+        print(f"Rank exiting: {this_rank}")
+        if this_rank:
+            pass
